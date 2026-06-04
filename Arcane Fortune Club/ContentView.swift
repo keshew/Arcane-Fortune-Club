@@ -18,32 +18,55 @@ struct ContentView: View {
 }
 
 private struct MainTabView: View {
+    @State private var selectedTab: AppTab = .today
+
     var body: some View {
-        TabView {
-            TodayView()
+        TabView(selection: $selectedTab) {
+            TodayView {
+                selectedTab = .games
+            }
                 .tabItem {
                     Label("Today", systemImage: "sun.max")
                 }
+                .tag(AppTab.today)
+
             GamesView()
                 .tabItem {
                     Label("Games", systemImage: "sparkles.rectangle.stack")
                 }
+                .tag(AppTab.games)
+
             ArtifactsView()
                 .tabItem {
                     Label("Artifacts", systemImage: "diamond")
                 }
-            MissionsView()
+                .tag(AppTab.artifacts)
+
+            MissionsView {
+                selectedTab = .games
+            }
                 .tabItem {
                     Label("Missions", systemImage: "point.3.filled.connected.trianglepath.dotted")
                 }
+                .tag(AppTab.missions)
+
             ProfileView()
                 .tabItem {
                     Label("Profile", systemImage: "person.crop.circle")
                 }
+                .tag(AppTab.profile)
         }
         .tint(AppPalette.icyBlue)
         .preferredColorScheme(.dark)
     }
+}
+
+private enum AppTab: Hashable {
+    case today
+    case games
+    case artifacts
+    case missions
+    case profile
 }
 
 private struct OnboardingFlow: View {
@@ -195,6 +218,9 @@ private struct RankStartCard: View {
 }
 
 private struct TodayView: View {
+    @State private var showFeaturedTrial = false
+    let openGames: () -> Void
+
     var body: some View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
@@ -211,6 +237,9 @@ private struct TodayView: View {
             }
             .background(AppGradientBackground())
             .navigationBarHidden(true)
+            .navigationDestination(isPresented: $showFeaturedTrial) {
+                TrialDetailView(trial: Trial.samples[0])
+            }
         }
     }
 
@@ -266,7 +295,7 @@ private struct TodayView: View {
             }
             .padding(.top, 2)
 
-            CompactButton(title: "Continue Ritual")
+            CompactButton(title: "Continue Ritual", action: openGames)
         }
         .padding(16)
         .glassPanel(cornerRadius: 22)
@@ -307,7 +336,9 @@ private struct TodayView: View {
                     Text("+900 Mind Points")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(AppPalette.softViolet)
-                    CompactButton(title: "Start Trial", horizontalPadding: 14, verticalPadding: 8)
+                    CompactButton(title: "Start Trial", horizontalPadding: 14, verticalPadding: 8) {
+                        showFeaturedTrial = true
+                    }
                 }
             }
             .padding(14)
@@ -414,7 +445,9 @@ private struct GamesView: View {
                 .foregroundStyle(AppPalette.mutedSteel)
             VStack(alignment: .leading, spacing: 8) {
                 ProgressChip(title: "0 / 3")
-                CompactButton(title: "View Set", horizontalPadding: 14, verticalPadding: 8)
+                CompactButton(title: "View Set", horizontalPadding: 14, verticalPadding: 8) {
+                    selectedCategory = "Memory"
+                }
             }
         }
         .padding(14)
@@ -469,7 +502,9 @@ private struct TrialDetailView: View {
                 PrimaryButton(title: "Start Trial") {
                     showActive = true
                 }
-                CompactButton(title: "Practice Mode", horizontalPadding: 16, verticalPadding: 10)
+                CompactButton(title: "Practice Mode", horizontalPadding: 16, verticalPadding: 10) {
+                    showActive = true
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -653,6 +688,7 @@ private struct ArtifactsView: View {
 
 private struct MissionsView: View {
     @State private var showReward = false
+    let openGames: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -667,8 +703,8 @@ private struct MissionsView: View {
                             .foregroundStyle(AppPalette.mutedSteel)
                     }
 
-                    MissionCard(title: "Daily Ritual Mission", description: "Complete 3 trials before midnight.", progress: "1 / 3", reward: "+1 500 Mind Points", actionTitle: "Continue")
-                    MissionCard(title: "Weekly Discipline", description: "Complete 15 trials this week.", progress: "4 / 15", reward: "+5 000 Mind Points", actionTitle: "View Trials")
+                    MissionCard(title: "Daily Ritual Mission", description: "Complete 3 trials before midnight.", progress: "1 / 3", reward: "+1 500 Mind Points", actionTitle: "Continue", action: openGames)
+                    MissionCard(title: "Weekly Discipline", description: "Complete 15 trials this week.", progress: "4 / 15", reward: "+5 000 Mind Points", actionTitle: "View Trials", action: openGames)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Streak Path")
@@ -700,7 +736,9 @@ private struct MissionsView: View {
                             BoostCard(title: "Memory Boost", icon: "brain.head.profile")
                             BoostCard(title: "Point Boost", icon: "sparkles")
                         }
-                        CompactButton(title: "Activate Boost")
+                        CompactButton(title: "Activate Boost") {
+                            showReward = true
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
@@ -748,7 +786,7 @@ private struct ProfileView: View {
                             NavigationLink {
                                 RankPathView()
                             } label: {
-                                CompactButton(title: "View Rank Path", horizontalPadding: 12, verticalPadding: 8)
+                                CompactButtonLabel(title: "View Rank Path", horizontalPadding: 12, verticalPadding: 8)
                             }
                             .buttonStyle(.plain)
                         }
@@ -970,6 +1008,30 @@ private struct CompactButton: View {
     }
 }
 
+private struct CompactButtonLabel: View {
+    let title: String
+    var horizontalPadding: CGFloat = 12
+    var verticalPadding: CGFloat = 8
+    var fillWidth: Bool = true
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 13, weight: .semibold, design: .rounded))
+            .foregroundStyle(AppPalette.silverText)
+            .frame(maxWidth: fillWidth ? .infinity : nil)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background(
+                Capsule()
+                    .fill(AppPalette.inkNavy.opacity(0.92))
+                    .overlay(
+                        Capsule()
+                            .stroke(AppPalette.icyBlue.opacity(0.5), lineWidth: 1)
+                    )
+            )
+    }
+}
+
 private struct ProgressChip: View {
     let title: String
 
@@ -1172,6 +1234,7 @@ private struct MissionCard: View {
     let progress: String
     let reward: String
     let actionTitle: String
+    let action: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1188,7 +1251,7 @@ private struct MissionCard: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(AppPalette.softViolet)
             }
-            CompactButton(title: actionTitle)
+            CompactButton(title: actionTitle, action: action)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
@@ -1352,7 +1415,11 @@ private extension Color {
     }
 }
 
-#Preview {
-    ContentView()
-        .preferredColorScheme(.dark)
+#if DEBUG
+private struct ContentViewPreviews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+            .preferredColorScheme(.dark)
+    }
 }
+#endif
