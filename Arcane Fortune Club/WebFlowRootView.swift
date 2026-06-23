@@ -30,6 +30,7 @@ private final class WebBootstrapViewModel: ObservableObject {
     private var isBootstrapping = false
     private var hasCreatedSessionThisLaunch = false
     private var lastHandledPushIDThisLaunch: String = ""
+    private var lastSentFCMTokenThisLaunch: String = ""
 
     @MainActor
     func start() {
@@ -54,7 +55,11 @@ private final class WebBootstrapViewModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trigger == "tokenReceived", hasCreatedSessionThisLaunch {
-            return
+            let currentToken = (UserDefaults.standard.string(forKey: "fcmToken") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if currentToken.isEmpty || currentToken == "null" || currentToken == lastSentFCMTokenThisLaunch {
+                return
+            }
         }
         if trigger == "pushClicked", hasCreatedSessionThisLaunch, pendingPushID.isEmpty {
             print("WEB FLOW skip pushClicked: session already created and push_id is empty")
@@ -91,6 +96,7 @@ private final class WebBootstrapViewModel: ObservableObject {
 
         if let cachedTaskLink = normalizeURLString(UserDefaults.standard.string(forKey: "taskLink")),
            trigger == "start" {
+            print("WEB FLOW cached taskLink found")
             await MainActor.run { self.phase = .web(cachedTaskLink) }
         }
 
@@ -99,11 +105,14 @@ private final class WebBootstrapViewModel: ObservableObject {
         }
 
         guard let controlsLinkString = normalizeURLString(UserDefaults.standard.string(forKey: "controlsLink")) else {
-            await MainActor.run { self.phase = .native }
+            print("WEB FLOW controlsLink missing; fallback=\(normalizeURLString(UserDefaults.standard.string(forKey: "taskLink")) == nil)")
+            if normalizeURLString(UserDefaults.standard.string(forKey: "taskLink")) == nil {
+                await MainActor.run { self.phase = .native }
+            }
             return
         }
 
-        let fcmToken = UserDefaults.standard.string(forKey: "fcmToken") ?? "null"
+        let fcmToken = await waitForFCMToken(upToSeconds: 8)
         print("WEB FLOW bootstrap fcmToken trigger=\(trigger) value=\(fcmToken)")
 
         let storedClientID = (UserDefaults.standard.string(forKey: "client_id") ?? "")
@@ -137,8 +146,10 @@ private final class WebBootstrapViewModel: ObservableObject {
         var request = URLRequest(url: controlsURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(resolvedClientUUID(), forHTTPHeaderField: "client-uuid")
+        let clientUUID = resolvedClientUUID()
+        request.setValue(clientUUID, forHTTPHeaderField: "client-uuid")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        print("WEB FLOW controls POST url=\(controlsURL.absoluteString) clientUUID=\(clientUUID)")
         let adjustAttribution = await waitForAdjustAttribution(upToSeconds: 5)
         print(
             "Adjust server payload:",
@@ -161,6 +172,7 @@ private final class WebBootstrapViewModel: ObservableObject {
             }
 
             let decoded = try JSONDecoder().decode(WebFlowResponse.self, from: data)
+            print("WEB FLOW controls response client_id=\(decoded.clientID) response=\(decoded.response ?? "nil")")
             UserDefaults.standard.set(decoded.clientID, forKey: "client_id")
 
             if let taskLink = normalizeURLString(decoded.response) {
@@ -172,6 +184,7 @@ private final class WebBootstrapViewModel: ObservableObject {
                     UserDefaults.standard.removeObject(forKey: "lastPushId")
                 }
                 await MainActor.run { self.hasCreatedSessionThisLaunch = true }
+                await MainActor.run { self.lastSentFCMTokenThisLaunch = fcmToken }
                 await MainActor.run { self.phase = .web(taskLink) }
             } else {
                 await MainActor.run { self.phase = .native }
@@ -259,22 +272,31 @@ private final class WebBootstrapViewModel: ObservableObject {
         ]
     }
 
-    private func configureControlsLink() async {
-        var userID = normalizedNonLegacyClientUUID(UserDefaults.standard.string(forKey: "userId")) ?? ""
-        if userID.isEmpty {
-            userID = normalizedNonLegacyClientUUID(UserDefaults.standard.string(forKey: "workingClientUUID")) ?? generatedClientUUID()
-            if userID.isEmpty {
-                userID = UUID().uuidString
+    private func waitForFCMToken(upToSeconds seconds: Int) async -> String {
+        let attempts = max(seconds * 4, 1)
+        for _ in 0..<attempts {
+            let token = (UserDefaults.standard.string(forKey: "fcmToken") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !token.isEmpty, token != "null" {
+                return token
             }
-            UserDefaults.standard.set(userID, forKey: "userId")
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
 
+        return UserDefaults.standard.string(forKey: "fcmToken") ?? "null"
+    }
+
+    private func configureControlsLink() async {
         guard let serviceLink = await fetchServiceLink() else {
+            print("WEB FLOW serviceLink missing")
             return
         }
 
         if let normalized = normalizeURLString(serviceLink) {
             UserDefaults.standard.set(normalized, forKey: "controlsLink")
+            print("WEB FLOW controlsLink saved=\(normalized)")
+        } else {
+            print("WEB FLOW serviceLink invalid=\(serviceLink)")
         }
     }
 
@@ -289,15 +311,21 @@ private final class WebBootstrapViewModel: ObservableObject {
                 guard let url = URL(string: endpoint) else { continue }
 
                 var request = URLRequest(url: url)
-                request.httpMethod = "GET"
+                request.httpMethod = "POST"
                 request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
                 request.setValue(clientUUID, forHTTPHeaderField: "client-uuid")
                 request.setValue("application/json", forHTTPHeaderField: "Accept")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = Data("{}".utf8)
+                print("WEB FLOW serviceLink request endpoint=\(endpoint) clientUUID=\(clientUUID)")
 
                 do {
                     let (data, response) = try await URLSession.shared.data(for: request)
 
                     guard let httpResponse = response as? HTTPURLResponse else { continue }
+                    let headerServiceLink = httpResponse.value(forHTTPHeaderField: "service-link") ?? httpResponse.value(forHTTPHeaderField: "Service-Link") ?? "nil"
+                    let bodySnippet = String(data: data.prefix(160), encoding: .utf8) ?? ""
+                    print("WEB FLOW serviceLink response status=\(httpResponse.statusCode) header=\(headerServiceLink) body=\(bodySnippet)")
                     if let serviceLink = extractServiceLink(from: httpResponse, bodyData: data) {
                         rememberWorkingClientUUID(clientUUID)
                         return serviceLink
@@ -325,7 +353,7 @@ private final class WebBootstrapViewModel: ObservableObject {
         appendIfValid(UserDefaults.standard.string(forKey: "workingClientUUID"))
         appendIfValid(generatedClientUUID())
 
-        return values.isEmpty ? [UUID().uuidString] : values
+        return values.isEmpty ? [UUID().uuidString.lowercased()] : values
     }
 
     private func resolvedClientUUID() -> String {
@@ -341,29 +369,35 @@ private final class WebBootstrapViewModel: ObservableObject {
     }
 
     private func rememberWorkingClientUUID(_ value: String) {
-        UserDefaults.standard.set(value, forKey: "workingClientUUID")
-        UserDefaults.standard.set(value, forKey: "userId")
+        guard let normalized = normalizedNonLegacyClientUUID(value) else { return }
+        UserDefaults.standard.set(normalized, forKey: "workingClientUUID")
+        UserDefaults.standard.set(normalized, forKey: "userId")
+        print("WEB FLOW working clientUUID saved=\(normalized)")
     }
 
     private func generatedClientUUID() -> String {
         let stored = (UserDefaults.standard.string(forKey: generatedClientUUIDKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if isValidUUID(stored) {
-            return stored
+        if let normalized = normalizedNonLegacyClientUUID(stored) {
+            if normalized != stored {
+                UserDefaults.standard.set(normalized, forKey: generatedClientUUIDKey)
+            }
+            return normalized
         }
 
-        let value = UUID().uuidString
+        let value = UUID().uuidString.lowercased()
         UserDefaults.standard.set(value, forKey: generatedClientUUIDKey)
+        print("WEB FLOW generated clientUUID=\(value)")
         return value
     }
 
     private func normalizedNonLegacyClientUUID(_ raw: String?) -> String? {
         guard let raw else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard isValidUUID(trimmed) else {
             return nil
         }
-        return trimmed
+        return trimmed.lowercased()
     }
 
     private func normalizeURLString(_ raw: String?) -> String? {
