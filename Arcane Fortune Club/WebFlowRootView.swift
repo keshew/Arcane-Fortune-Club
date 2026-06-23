@@ -2,6 +2,7 @@ import AdjustSdk
 import AdSupport
 import AppTrackingTransparency
 import SwiftUI
+import UserNotifications
 @preconcurrency import WebKit
 
 private enum WebBootstrapPhase: Equatable {
@@ -36,10 +37,6 @@ private final class WebBootstrapViewModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if hasCreatedSessionThisLaunch, pendingPushID.isEmpty {
             print("WEB FLOW skip start: session already created in this launch")
-            return
-        }
-        if !hasUsableFCMToken(), pendingPushID.isEmpty {
-            print("WEB FLOW wait start: fcmToken is not ready")
             return
         }
         guard !isBootstrapping else { return }
@@ -87,6 +84,8 @@ private final class WebBootstrapViewModel: ObservableObject {
     }
 
     private func bootstrap(trigger: String) async {
+        await requestPushPermissionAndRegister()
+        try? await Task.sleep(nanoseconds: 500_000_000)
         await requestATTAndStoreIDFA()
         print("WEB FLOW bootstrap trigger=\(trigger)")
 
@@ -141,6 +140,12 @@ private final class WebBootstrapViewModel: ObservableObject {
         request.setValue(resolvedClientUUID(), forHTTPHeaderField: "client-uuid")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         let adjustAttribution = await waitForAdjustAttribution(upToSeconds: 5)
+        print(
+            "Adjust server payload:",
+            "adid=\(adjustID.isEmpty ? "empty" : adjustID)",
+            "idfa=\(idfa.isEmpty ? "empty" : idfa)",
+            "attributionKeys=\(adjustAttribution.keys.sorted())"
+        )
         let requestBody: [String: Any] = [
             "adjust": adjustAttribution,
             "referrer": referrer
@@ -177,10 +182,20 @@ private final class WebBootstrapViewModel: ObservableObject {
         }
     }
 
-    private func hasUsableFCMToken() -> Bool {
-        let token = (UserDefaults.standard.string(forKey: "fcmToken") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return !token.isEmpty && token.lowercased() != "null"
+    @MainActor
+    private func requestPushPermissionAndRegister() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+
+        if settings.authorizationStatus == .notDetermined {
+            do {
+                _ = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+            } catch {
+                print("WEB FLOW push permission error=\(error.localizedDescription)")
+            }
+        }
+
+        UIApplication.shared.registerForRemoteNotifications()
     }
 
     @MainActor
